@@ -6,6 +6,36 @@ from datasets import get_dataset_config_names, load_dataset
 from PIL import Image
 from torch.utils.data import Dataset
 from tqdm import tqdm
+import random
+
+# TODO: read the Flan paper to figure out how to diversify question templates
+question_templates = [
+    'Is the caption "{}" accurate and detailed in describing the image?',
+    'Does the description "{}" match what you see in the image?',
+    'Is there a strong correspondence between the image and the text "{}"?',
+    'Does the image contain all the key elements mentioned in "{}"?',
+    'Would you say that "{}" provides a faithful representation of the image?',
+    'Is the statement "{}" consistent with the visual content of the image?',
+    'Can all the details mentioned in "{}" be verified in the image?',
+    'Does "{}" accurately capture the main subject or focus of the image?',
+     'Is "{}" comprehensive in covering all major aspects of the image?',
+     'Is "{}" entirely consistent with what you see in the image?', 
+]
+
+yesono_template = [
+    'Please answer using a single word: yes or no.',
+    'Please answer yes or no.',
+    'Respond with either "yes" or "no".',
+    'Give a one-word answer: yes or no.',
+    'Answer with just "yes" or "no".',
+    'Provide a binary response: yes/no.',
+    'Reply with a simple yes or no.',
+    'Use only "yes" or "no" in your response.',
+    'Limit your answer to yes or no.',
+    'Respond briefly with yes or no.',
+    'Give a concise yes or no answer.',
+    'Answer affirmatively or negatively: yes/no.',
+]
 
 
 class BaseDataset(Dataset):
@@ -25,6 +55,51 @@ class BaseDataset(Dataset):
         if not text.endswith("?") and is_question:
             text += "?"
         return text
+    
+class FilteringVQADataset(BaseDataset):
+    def __init__(self, split):
+        super().__init__(split)
+        data_path = "/home/haoli/VLM-prune/data/combined_florence_data.parquet"
+        full_data = pd.read_parquet(data_path)
+        
+        # Shuffle the data
+        full_data = full_data.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        # Calculate split index
+        split_idx = int(len(full_data) * 0.99)
+        
+        # Split the data
+        if split == 'train':
+            self.data = full_data.iloc[:split_idx]
+        elif split == 'val':
+            self.data = full_data.iloc[split_idx:]
+        else:
+            raise ValueError("Split must be either 'train' or 'val'")
+        
+        self.task_prompt = "<FILTER>"
+    
+    def sample_template(self, caption):
+
+        # random order and question type for robustness
+        random_boolean = random.choice([True, False])
+        question_template = random.choice(question_templates)
+        question_template = question_template.format(caption)
+        yesono_template = random.choice(yesono_template)
+
+        if random_boolean:
+            return self.task_prompt + " " + question_template + " " + yesono_template
+        else:
+            return self.task_prompt + " " + yesono_template + " " + question_template
+
+    def __getitem__(self, idx): 
+        row = self.data.iloc[idx]
+        question = self.sample_template(row['caption'])
+        answer = row['label']
+        image_path = row['file_path']
+        image = Image.open(image_path)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        return question, answer, image
 
 
 class DocVQADataset(BaseDataset):

@@ -1,4 +1,5 @@
 import os
+import wandb
 
 import torch
 from torch.utils.data import DataLoader
@@ -6,31 +7,59 @@ from tqdm import tqdm
 from transformers import (AdamW, AutoModelForCausalLM, AutoProcessor,
                           get_scheduler)
 
-from data import DocVQADataset
+from data import FilteringVQADataset
+
+from peft import LoraConfig, get_peft_model
+
+TARGET_MODULES = [
+    "q_proj", "o_proj", "k_proj", "v_proj", 
+    "linear", "Conv2d", "lm_head", "fc2"
+]
+
+# pr 6 for base, pr 10 for large
+REVISION = "refs/pr/10"
+
+config = LoraConfig(
+    r=8,
+    lora_alpha=16,
+    target_modules=TARGET_MODULES,
+    task_type="CAUSAL_LM",
+    lora_dropout=0.05,
+    bias="none",
+    inference_mode=False,
+    use_rslora=True,
+    init_lora_weights="gaussian",
+    revision=REVISION
+)
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Initialize wandb
+wandb.init(project="florence2-finetuning")
+
 # Load the model and processor
 model = AutoModelForCausalLM.from_pretrained(
-    "microsoft/Florence-2-base-ft", trust_remote_code=True, revision="refs/pr/6"
+    "microsoft/Florence-2-large-ft", trust_remote_code=True, revision=REVISION
 ).to(device)
 processor = AutoProcessor.from_pretrained(
-    "microsoft/Florence-2-base-ft", trust_remote_code=True, revision="refs/pr/6"
+    "microsoft/Florence-2-large-ft", trust_remote_code=True, revision=REVISION
 )
 
+peft_model = get_peft_model(model, config)
+peft_model.print_trainable_parameters()
 
 def collate_fn(batch):
     questions, answers, images = zip(*batch)
     inputs = processor(
-        text=list(questions), images=list(images), return_tensors="pt", padding=True
+        text=list(questions), images=list(images), return_tensors="pt", padding=True, max_length=1024, truncation=True
     ).to(device)
     return inputs, answers
 
 
 # Create datasets
-train_dataset = DocVQADataset("train")
-val_dataset = DocVQADataset("validation")
+train_dataset = FilteringVQADataset("train")
+val_dataset = FilteringVQADataset("val")
 
 # Create DataLoader
 batch_size = 8
@@ -97,14 +126,14 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
                 for generated_text, answer in zip(generated_texts, answers):
                     parsed_answer = processor.post_process_generation(
                         generated_text,
-                        task="<DocVQA>",
+                        task="<FilteringVQA>",
                         image_size=(
                             inputs["pixel_values"].shape[-2],
                             inputs["pixel_values"].shape[-1],
                         ),
                     )
                     print("GT:", answer)
-                    print("Pred:", parsed_answer["<DocVQA>"])
+                    print("Pred:", parsed_answer["<FilteringVQA>"])
 
             loss.backward()
             optimizer.step()
@@ -115,6 +144,7 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
 
         avg_train_loss = train_loss / len(train_loader)
         print(f"Average Training Loss: {avg_train_loss}")
+        wandb.log({"epoch": epoch + 1, "train_loss": avg_train_loss})
 
         # Validation phase
         model.eval()
@@ -143,6 +173,7 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
 
         avg_val_loss = val_loss / len(val_loader)
         print(f"Average Validation Loss: {avg_val_loss}")
+        wandb.log({"epoch": epoch + 1, "val_loss": avg_val_loss})
 
         # Save model checkpoint
         output_dir = f"./model_checkpoints/epoch_{epoch+1}"
@@ -150,4 +181,8 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
         model.save_pretrained(output_dir)
         processor.save_pretrained(output_dir)
 
-train_model(train_loader, val_loader, model, processor, epochs=3)
+
+
+# run training
+model = torch.compile(model)
+train_model(train_loader, val_loader, peft_model, processor, epochs=3)

@@ -28,7 +28,7 @@ flash-attn==2.5.9.post1
 fqdn==1.5.1
 friendlywords==1.1.3
 frozenlist==1.4.1
-fsspec==2024.6.0
+fsspec
 h11==0.14.0
 httpcore==1.0.5
 httpx==0.27.0
